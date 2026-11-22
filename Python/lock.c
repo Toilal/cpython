@@ -26,10 +26,13 @@ static const PyTime_t TIME_TO_BE_FAIR_NS = 1000*1000;
 // `--disable-gil` builds because it is unlikely to be helpful if the GIL is
 // enabled.
 #ifdef Py_GIL_DISABLED
-static const int MAX_SPIN_COUNT = 40;
+static const int MAX_SPIN_COUNT = 6;
 #else
 static const int MAX_SPIN_COUNT = 0;
 #endif
+
+// Spin step N waits 2**N CPU pause hints and then re-reads the lock: a
+// spinning waiter never hands its core to the scheduler.
 
 struct mutex_entry {
     // The time after which the unlocking thread should hand off lock ownership
@@ -47,6 +50,18 @@ _Py_yield(void)
     SwitchToThread();
 #elif defined(HAVE_SCHED_H)
     sched_yield();
+#endif
+}
+
+static inline void
+_Py_cpu_pause(void)
+{
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+    __asm__ volatile("pause" ::: "memory");
+#elif defined(__GNUC__) && defined(__aarch64__)
+    __asm__ volatile("yield" ::: "memory");
+#else
+    _Py_yield();
 #endif
 }
 
@@ -89,9 +104,12 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
         }
 
         if (!(v & _Py_HAS_PARKED) && spin_count < MAX_SPIN_COUNT) {
-            // Spin for a bit.
-            _Py_yield();
+            // Spin for a bit, then look at the lock again.
+            for (int i = 1 << spin_count; i > 0; i--) {
+                _Py_cpu_pause();
+            }
             spin_count++;
+            v = _Py_atomic_load_uint8_relaxed(&m->_bits);
             continue;
         }
 
