@@ -37,7 +37,7 @@ static const int MAX_SPIN_COUNT = 0;
 // yield could cost a whole time slice. The thread then parks at once, and
 // parks without spinning on its next SPIN_SKIP contended acquisitions.
 static const PyTime_t MAX_SPIN_NS = 100*1000;
-static const PyTime_t SLOW_YIELD_NS = 50*1000;
+static const PyTime_t SLOW_YIELD_NS = 500*1000;
 static const int SPIN_SKIP = 256;
 static _Py_thread_local int spins_to_skip = 0;
 
