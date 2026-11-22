@@ -31,6 +31,10 @@ static const int MAX_SPIN_COUNT = 40;
 static const int MAX_SPIN_COUNT = 0;
 #endif
 
+// A spin that has lasted longer than this parks, yields left or not: on an
+// oversubscribed machine a single sched_yield() can last a whole time slice.
+static const PyTime_t MAX_SPIN_NS = 100*1000;
+
 struct mutex_entry {
     // The time after which the unlocking thread should hand off lock ownership
     // directly to the waiting thread. Written by the waiting thread.
@@ -92,6 +96,11 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
             // Spin for a bit.
             _Py_yield();
             spin_count++;
+            PyTime_t spun;
+            (void)PyTime_MonotonicRaw(&spun);
+            if (spun - now > MAX_SPIN_NS) {
+                spin_count = MAX_SPIN_COUNT;
+            }
             continue;
         }
 
