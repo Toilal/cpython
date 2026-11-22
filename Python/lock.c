@@ -89,6 +89,7 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
     };
 
     Py_ssize_t spin_count = 0;
+    PyTime_t last_read = now;
     if (spins_to_skip > 0) {
         spins_to_skip--;
         spin_count = MAX_SPIN_COUNT;
@@ -104,18 +105,18 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
 
         if (!(v & _Py_HAS_PARKED) && spin_count < MAX_SPIN_COUNT) {
             // Spin for a bit.
-            PyTime_t before, after;
-            (void)PyTime_MonotonicRaw(&before);
             _Py_yield();
-            (void)PyTime_MonotonicRaw(&after);
             spin_count++;
-            if (after - before > SLOW_YIELD_NS) {
+            PyTime_t yielded;
+            (void)PyTime_MonotonicRaw(&yielded);
+            if (yielded - last_read > SLOW_YIELD_NS) {
                 spins_to_skip = SPIN_SKIP;
                 spin_count = MAX_SPIN_COUNT;
             }
-            else if (after - now > MAX_SPIN_NS) {
+            else if (yielded - now > MAX_SPIN_NS) {
                 spin_count = MAX_SPIN_COUNT;
             }
+            last_read = yielded;
             continue;
         }
 
@@ -146,6 +147,8 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
 
         int ret = _PyParkingLot_Park(&m->_bits, &newv, sizeof(newv), timeout,
                                      &entry, (flags & _PY_LOCK_DETACH) != 0);
+        // A spin after a wake-up must not count the time parked as a yield.
+        (void)PyTime_MonotonicRaw(&last_read);
         if (ret == Py_PARK_OK) {
             if (entry.handed_off) {
                 // We own the lock now. thread.Lock allows other threads
