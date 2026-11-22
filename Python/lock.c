@@ -32,10 +32,12 @@ static const int MAX_SPIN_COUNT = 0;
 #endif
 
 // A spin that has lasted longer than MAX_SPIN_NS parks, yields left or not.
-// A single yield that lasted longer than SLOW_YIELD_NS handed the core to
-// another runnable thread: the machine is oversubscribed, and each further
-// yield could cost a whole time slice. The thread then parks at once, and
-// parks without spinning on its next SPIN_SKIP contended acquisitions.
+// Yields that lasted longer than SLOW_YIELD_NS handed the core to another
+// runnable thread: the machine is oversubscribed, and each further yield could
+// cost a whole time slice. The thread then parks at once, and parks without
+// spinning on its next SPIN_SKIP contended acquisitions. The clock is read
+// after the first yield, then every YIELDS_PER_CLOCK_READ yields.
+static const int YIELDS_PER_CLOCK_READ = 8;
 static const PyTime_t MAX_SPIN_NS = 100*1000;
 static const PyTime_t SLOW_YIELD_NS = 500*1000;
 static const int SPIN_SKIP = 256;
@@ -89,6 +91,7 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
     };
 
     Py_ssize_t spin_count = 0;
+    PyTime_t last_read = now;
     if (spins_to_skip > 0) {
         spins_to_skip--;
         spin_count = MAX_SPIN_COUNT;
@@ -104,17 +107,19 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
 
         if (!(v & _Py_HAS_PARKED) && spin_count < MAX_SPIN_COUNT) {
             // Spin for a bit.
-            PyTime_t before, after;
-            (void)PyTime_MonotonicRaw(&before);
             _Py_yield();
-            (void)PyTime_MonotonicRaw(&after);
             spin_count++;
-            if (after - before > SLOW_YIELD_NS) {
-                spins_to_skip = SPIN_SKIP;
-                spin_count = MAX_SPIN_COUNT;
-            }
-            else if (after - now > MAX_SPIN_NS) {
-                spin_count = MAX_SPIN_COUNT;
+            if (spin_count % YIELDS_PER_CLOCK_READ == 1) {
+                PyTime_t spun;
+                (void)PyTime_MonotonicRaw(&spun);
+                if (last_read != 0 && spun - last_read > SLOW_YIELD_NS) {
+                    spins_to_skip = SPIN_SKIP;
+                    spin_count = MAX_SPIN_COUNT;
+                }
+                else if (spun - now > MAX_SPIN_NS) {
+                    spin_count = MAX_SPIN_COUNT;
+                }
+                last_read = spun;
             }
             continue;
         }
@@ -146,6 +151,8 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
 
         int ret = _PyParkingLot_Park(&m->_bits, &newv, sizeof(newv), timeout,
                                      &entry, (flags & _PY_LOCK_DETACH) != 0);
+        // The time parked is not a yield.
+        last_read = 0;
         if (ret == Py_PARK_OK) {
             if (entry.handed_off) {
                 // We own the lock now. thread.Lock allows other threads
