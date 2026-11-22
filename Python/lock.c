@@ -38,7 +38,7 @@ static const int MAX_SPIN_COUNT = 0;
 // parks without spinning on its next SPIN_SKIP contended acquisitions.
 static const PyTime_t MAX_SPIN_NS = 100*1000;
 static const PyTime_t SLOW_YIELD_NS = 500*1000;
-static const int SPIN_SKIP = 256;
+static const int SPIN_SKIP = 64;
 static _Py_thread_local int spins_to_skip = 0;
 
 struct mutex_entry {
