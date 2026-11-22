@@ -31,6 +31,16 @@ static const int MAX_SPIN_COUNT = 40;
 static const int MAX_SPIN_COUNT = 0;
 #endif
 
+// A spin that has lasted longer than MAX_SPIN_NS parks, yields left or not.
+// A single yield that lasted longer than SLOW_YIELD_NS handed the core to
+// another runnable thread: the machine is oversubscribed, and each further
+// yield could cost a whole time slice. The thread then parks at once, and
+// parks without spinning on its next SPIN_SKIP contended acquisitions.
+static const PyTime_t MAX_SPIN_NS = 100*1000;
+static const PyTime_t SLOW_YIELD_NS = 50*1000;
+static const int SPIN_SKIP = 256;
+static _Py_thread_local int spins_to_skip = 0;
+
 struct mutex_entry {
     // The time after which the unlocking thread should hand off lock ownership
     // directly to the waiting thread. Written by the waiting thread.
@@ -79,6 +89,10 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
     };
 
     Py_ssize_t spin_count = 0;
+    if (spins_to_skip > 0) {
+        spins_to_skip--;
+        spin_count = MAX_SPIN_COUNT;
+    }
     for (;;) {
         if ((v & _Py_LOCKED) == 0) {
             // The lock is unlocked. Try to grab it.
@@ -90,8 +104,18 @@ _PyMutex_LockTimed(PyMutex *m, PyTime_t timeout, _PyLockFlags flags)
 
         if (!(v & _Py_HAS_PARKED) && spin_count < MAX_SPIN_COUNT) {
             // Spin for a bit.
+            PyTime_t before, after;
+            (void)PyTime_MonotonicRaw(&before);
             _Py_yield();
+            (void)PyTime_MonotonicRaw(&after);
             spin_count++;
+            if (after - before > SLOW_YIELD_NS) {
+                spins_to_skip = SPIN_SKIP;
+                spin_count = MAX_SPIN_COUNT;
+            }
+            else if (after - now > MAX_SPIN_NS) {
+                spin_count = MAX_SPIN_COUNT;
+            }
             continue;
         }
 
